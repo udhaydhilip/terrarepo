@@ -1,0 +1,217 @@
+terraform {
+  required_providers {
+    aws = {
+      source = "hashicorp/aws"
+      version = "5.95.0"
+    }
+  }
+}
+
+provider "aws" {
+  region = "ap-south-1"
+}
+
+resource "aws_vpc" "my_terra_vpc" {
+  cidr_block           = "10.0.0.0/16"
+  enable_dns_support   = true
+  enable_dns_hostnames = true
+  tags = {
+    Name = "my_terra_vpc"
+  }
+}
+
+resource "aws_subnet" "my_inter_sub" {
+  vpc_id                  = aws_vpc.my_terra_vpc.id
+  cidr_block              = "10.0.1.0/24"
+  map_public_ip_on_launch = true
+  availability_zone       = "ap-south-1a"
+  tags = {
+    Name = "my_inter_sub"           # public Subnet
+  }
+}
+
+resource "aws_subnet" "my_local_sub" {
+  vpc_id                  = aws_vpc.my_terra_vpc.id
+  cidr_block              = "10.0.2.0/24"
+  map_public_ip_on_launch = false
+  availability_zone       = "ap-south-1a"
+  tags = {
+    Name = "my_local_sub"           # Private Subnet
+  }
+}
+
+resource "aws_internet_gateway" "igw" {
+  vpc_id = aws_vpc.my_terra_vpc.id
+  tags = {
+    Name = "my_local_igw"           # Private igw
+  }
+}
+
+resource "aws_eip" "nat" {
+  domain = "vpc"
+}
+
+resource "aws_nat_gateway" "nat" {
+  allocation_id = aws_eip.nat.id
+  subnet_id     = aws_subnet.my_inter_sub.id
+  tags = {
+    Name = "my_nat_gateway"         # Public Subnet NAT 
+  }
+}
+
+resource "aws_route_table" "public_rt" {
+  vpc_id = aws_vpc.my_terra_vpc.id
+
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.igw.id
+  }
+
+  tags = {
+    Name = "public_rt"
+  }
+}
+
+resource "aws_route_table_association" "inter_sub_assoc" {
+  subnet_id      = aws_subnet.my_inter_sub.id
+  route_table_id = aws_route_table.public_rt.id
+}
+
+resource "aws_route_table" "private_rt" {
+  vpc_id = aws_vpc.my_terra_vpc.id
+
+  route {
+    cidr_block     = "0.0.0.0/0"
+    nat_gateway_id = aws_nat_gateway.nat.id
+  }
+
+  tags = {
+    Name = "private_rt"
+  }
+}
+
+resource "aws_route_table_association" "local_sub_assoc" {
+  subnet_id      = aws_subnet.my_local_sub.id
+  route_table_id = aws_route_table.private_rt.id
+}
+
+# Security Groups
+resource "aws_security_group" "inter_sg" {
+  name        = "inter_sg"
+  description = "Allow HTTP, SSH, RDP"
+  vpc_id      = aws_vpc.my_terra_vpc.id
+
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    from_port   = 3389
+    to_port     = 3389
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "inter_sg"
+  }
+}
+
+resource "aws_security_group" "local_sg" {
+  name        = "local_sg"
+  description = "Internal only - SSH, HTTP, RDP"
+  vpc_id      = aws_vpc.my_terra_vpc.id
+
+  ingress {
+    from_port       = 22
+    to_port         = 22
+    protocol        = "tcp"
+    security_groups = [aws_security_group.inter_sg.id]
+  }
+
+  ingress {
+    from_port       = 80
+    to_port         = 80
+    protocol        = "tcp"
+    security_groups = [aws_security_group.inter_sg.id]
+  }
+
+  ingress {
+    from_port       = 3389
+    to_port         = 3389
+    protocol        = "tcp"
+    security_groups = [aws_security_group.inter_sg.id]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "local_sg"
+  }
+}
+
+# Windows instance
+resource "aws_instance" "windows_instance" {
+  ami                    = "ami-0907008e2c2a9e429" # Example Windows AMI for ap-south-1
+  instance_type          = "t3.micro"
+  subnet_id              = aws_subnet.my_inter_sub.id
+  associate_public_ip_address = true
+  vpc_security_group_ids = [aws_security_group.inter_sg.id]
+  key_name               = "add-key"
+
+  tags = {
+    Name = "windows_server"
+  }
+}
+
+# Ubuntu EC2 (x4)
+resource "aws_instance" "ubuntu_instances" {
+  count                  = 1                        # Increase the count if you want
+  ami                    = "ami-0e35ddab05955cf57"  # Ubuntu 24.04 for ap-south-1
+  instance_type          = "t2.micro"
+  subnet_id              = aws_subnet.my_local_sub.id
+  associate_public_ip_address = false
+  vpc_security_group_ids = [aws_security_group.local_sg.id]
+  key_name               = "add-key"
+
+  tags = {
+    Name = "ubuntu_${count.index + 1}"
+  }
+}
+
+# RHEL EC2 (x2)
+resource "aws_instance" "rhel_instances" {
+  count                  = 1                        # Increase the count if you want
+  ami                    = "ami-0402e56c0a7afb78f" # RHEL 8 for ap-south-1
+  instance_type          = "t2.micro"
+  subnet_id              = aws_subnet.my_local_sub.id
+  associate_public_ip_address = false
+  vpc_security_group_ids = [aws_security_group.local_sg.id]
+  key_name               = "add-key"
+
+  tags = {
+    Name = "rhel_${count.index + 1}"
+  }
+}
